@@ -43,7 +43,7 @@ def full_preprocessing(df): #only on X features
   X_preprocessed= remove_low_cardinality(X_preprocessed)
   X_preprocessed= delete_row_missing_values(X_preprocessed)
   df_preprocessed = X_preprocessed.copy()
-  df_preprocessed[target_col] = df[target_col].reindex(X_preprocessed.index)
+  df_preprocessed[target_col] = df[target_col].reindex(X_preprocessed.index) #realign the target with the processed features
   return df_preprocessed
 
 def get_split_type(model_name):
@@ -53,20 +53,18 @@ def get_split_type(model_name):
     return "quantile"
 
 def split_data(X, y, type_scale="standard", rng=None):
-  if type_scale == "standard":
-    scaler = StandardScaler()
-  elif type_scale == "quantile":
+  if type_scale == "quantile":
     scaler = QuantileTransformer(output_distribution="normal", random_state=rng)
     
   X_train, X_test, y_train, y_test = train_test_split(X, y, train_size=0.7, random_state=rng)
   X_val, X_test, y_val, y_test = train_test_split(X_test, y_test, train_size=0.3, random_state=rng)
   X_train, y_train = X_train[:10000], y_train[:10000]
-  X_val, y_val = X_val[:50000], y_val[:50000] #Truncate validation and test to 50,000 samples as said in the paper
+  X_val, y_val = X_val[:50000], y_val[:50000] #Truncate validation and test to 50,000 samples as said in the benchmark paper
   X_test, y_test = X_test[:50000], y_test[:50000]
-
-  X_train = scaler.fit_transform(X_train)
-  X_val = scaler.transform(X_val)
-  X_test = scaler.transform(X_test)
+  if type_scale == "quantile":
+    X_train = scaler.fit_transform(X_train)
+    X_val = scaler.transform(X_val)
+    X_test = scaler.transform(X_test)
 
   X_train, y_train = np.array(X_train, dtype=np.float32), np.array(y_train, dtype=np.float32)
   X_val, y_val = np.array(X_val, dtype=np.float32), np.array(y_val, dtype=np.float32)
@@ -100,10 +98,10 @@ def generate_hyperparameters_space(model_name):
   if model_name == "LassoNet":
     parameters = {
       "lambda_indexes" : np.arange(5, 400, 10),
-      "num_layers" : range(1, 7),
+      "num_layers" : range(1, 9),
       "layer_sizes" : range(16, 1025),
       "batch_sizes" : [256, 512, 1024],
-      "M_list" : [5, 10, 20, 50, 100]
+      "M_list" : [10, 50, 100]
     }
   
   elif model_name == "MLP":
@@ -173,7 +171,6 @@ def FT_train(model, train_loader, val_loader, test_loader, lr, n_epochs):
     # Free unused cached GPU memory after each epoch
     torch.cuda.empty_cache()
 
-    # Evaluate R² on validation set
     if epoch == n_epochs - 1:
       model.eval()
       val_preds = []
@@ -182,18 +179,19 @@ def FT_train(model, train_loader, val_loader, test_loader, lr, n_epochs):
               preds = model(xb, None)
               val_preds.append(preds.cpu())
               
-      model.eval()
       test_preds = []
       with torch.no_grad():
           for xb, yb in test_loader:
               preds = model(xb, None)
               test_preds.append(preds.cpu())
+              
       y_pred_val = torch.cat(val_preds).numpy()
       y_pred_test = torch.cat(test_preds).numpy()
 
   return y_pred_val, y_pred_test
 
 def generate_config(model_name, n_iterations, n_shuffles):
+  "The configs have been inspired by the hyperparameter grids provided in the tabular data benchmark paper"
   models = []
   shuffle_configs = []
   parameters = generate_hyperparameters_space(model_name)
@@ -343,17 +341,15 @@ def process_fold(i, X_train, y_train, X_val, y_val, X_test, y_test, model_name, 
         'n_fold': int(i + 1),
         'val_score': None,
         'test_score': None,
-        'elapsed_time': None,
+        'fit_time': None,
         'parameters': model_parameters if model_parameters is not None else "No hyperparameters"
     }
 
     if model_name == "LassoNet":
-      path = model.path(X_train, y_train, return_state_dicts=True)  
-      while lambda_index >= len(path):
-        lambda_index -= len(path)
-      
-      selected = path[lambda_index].selected
       start = time.time()
+      path = model.path(X_train, y_train, return_state_dicts=True)  
+      lambda_index = lambda_index % len(path)
+      selected = path[lambda_index].selected
       model.fit(X_train[:, selected], y_train, dense_only=True)
       end = time.time()
       y_pred_val = model.predict(X_val[:, selected])
@@ -374,7 +370,7 @@ def process_fold(i, X_train, y_train, X_val, y_val, X_test, y_test, model_name, 
           X_train=X_train,
           eval_set=[X_val],
           pretraining_ratio=0.2,
-          max_epochs=5,
+          max_epochs=10,
           batch_size=batch_size_tabnet,
           num_workers=0,
           drop_last=True
@@ -394,7 +390,7 @@ def process_fold(i, X_train, y_train, X_val, y_val, X_test, y_test, model_name, 
 
     elif model_name == "FT-Transformer":
       X_train = torch.tensor(X_train, dtype=torch.float32)
-      y_train = torch.tensor(y_train, dtype=torch.float32).unsqueeze(1)
+      y_train = torch.tensor(y_train, dtype=torch.float32).unsqueeze(1) #expects target tensor to be 2D
       X_val = torch.tensor(X_val, dtype=torch.float32)
       y_val = torch.tensor(y_val, dtype=torch.float32).unsqueeze(1)
       X_test = torch.tensor(X_test, dtype=torch.float32)
@@ -412,6 +408,7 @@ def process_fold(i, X_train, y_train, X_val, y_val, X_test, y_test, model_name, 
       n_cont_features = X_train.shape[1]
 
       if not model_parameters:
+        #had to initialize values for all these parameters or else the model was not running
           model = FTTransformer(
               n_cont_features=n_cont_features,
               cat_cardinalities=[],
@@ -431,8 +428,8 @@ def process_fold(i, X_train, y_train, X_val, y_val, X_test, y_test, model_name, 
         model = FTTransformer(
             n_cont_features=n_cont_features,
             cat_cardinalities=[],
-            d_out=1,
-            d_block=192,
+            d_out=1, #regression
+            d_block=192, 
             n_blocks=n_layers,
             attention_n_heads=8,
             attention_dropout=attention_dropout,
@@ -459,12 +456,12 @@ def process_fold(i, X_train, y_train, X_val, y_val, X_test, y_test, model_name, 
       y_pred_val = model.predict(X_val)
       y_pred_test = model.predict(X_test)
 
-    elapsed_time = end - start
+    fit_time = end - start
     val_score = r2_score(y_val, y_pred_val)
     test_score = r2_score(y_test, y_pred_test)
     result['val_score'] = val_score
     result['test_score'] = test_score
-    result['elapsed_time'] = elapsed_time
+    result['fit_time'] = fit_time
 
     return result
   
@@ -482,7 +479,7 @@ def train(n_iterations, model_name, splits):
     for model_parameters in shuffle:
       model = None
       unsupervised_model = None
-      lambda_index = None  # Add this at the top
+      lambda_index = None  
       attention_dropout = None
       n_layers = None
       batch_size_ft = None
@@ -596,7 +593,8 @@ def train(n_iterations, model_name, splits):
         else:
           print('Model not in the code yet.')
           return None
-        
+      
+      #run parallel on folds  
       fold_results = Parallel(n_jobs=-1)(
           delayed(process_fold)(
               i, X_train, y_train, X_val, y_val, X_test, y_test, model_name, model, 
@@ -614,7 +612,7 @@ def train(n_iterations, model_name, splits):
             int(index_iterations + 1),
             fold_result['val_score'],
             fold_result['test_score'],
-            fold_result['elapsed_time'],
+            fold_result['fit_time'],
             fold_result['parameters']
         ]
         index += 1
@@ -625,9 +623,8 @@ def train(n_iterations, model_name, splits):
   
   return results_df
 
-
-def main() -> None:
-  #Numerical regression
+if __name__ == '__main__':
+    #Numerical regression
   dataset_ids = {
     "cpu_act": 44132,
     "pol": 44133,
@@ -647,7 +644,7 @@ def main() -> None:
     "medical_charges": 44146,
     "MiamiHousing2016": 44147,
     "superconduct": 44148
-  }
+  } #ids received from openml website 
 
 
   datasets = {}
@@ -657,7 +654,6 @@ def main() -> None:
     df = pd.DataFrame(X, columns=attributes)
     df[dataset.default_target_attribute] = y
     datasets[name] = df
-    print(f"Downloaded dataset '{name}' with {X.shape[0]} samples and {X.shape[1]} features.")
       
   random_state = 42    
   preprocessed_datasets = {name: full_preprocessing(df) for name, df in datasets.items()}
@@ -667,18 +663,19 @@ def main() -> None:
     df = preprocessed_datasets[name]
     X = df.drop(df.columns[-1], axis=1)
     y = df[df.columns[-1]]
+    #no need to scale for tree-based models
+    standard_splits = [split_data(X, y, type_scale="standard", rng=random_state+i) for i in range(n_iter)]
+    standard_precomputed_splits[name] = standard_splits
     log_scale = check_heavy_tail(y)
     y = np.log(y + 1e-6) if log_scale else scale(y)  # Apply transformation once
     X_test = split_data(X, y, type_scale="quantile", rng=random_state)[4]  # Get X_test for n_folds
     n_iter = n_folds(X_test)
     quantile_splits = [split_data(X, y, type_scale="quantile", rng=random_state+i) for i in range(n_iter)]
     quantile_precomputed_splits[name] = quantile_splits
-    standard_splits = [split_data(X, y, type_scale="standard", rng=random_state+i) for i in range(n_iter)]
-    standard_precomputed_splits[name] = standard_splits
 
-  n_iterations = 10
+  n_iterations = 25
 
-  model_names = ["RandomForest", "XGBoost"]
+  model_names = ["LassoNet"]
   
   for model_name in model_names:
     big_df = []
@@ -696,7 +693,3 @@ def main() -> None:
       big_df.append(result_df)
     final_df = pd.concat(big_df, ignore_index=True)
     final_df.to_pickle(f"results_{n_iterations}iter_{model_name}1.pkl")
-
-
-if __name__ == '__main__':
-  main() 

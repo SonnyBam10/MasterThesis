@@ -19,6 +19,7 @@ import torch.nn as nn
 import shap
 import matplotlib.pyplot as plt
 from shap.explainers import GradientExplainer
+from sklearn.datasets import make_friedman1
 
 #Functions
 def delete_missing_values(df, threshold=0.7):
@@ -72,13 +73,17 @@ def FT_train(model, train_loader, val_loader, test_loader, lr, n_epochs):
   loss_fn = nn.MSELoss()
   optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
+  y_pred_train = 0
   y_pred_val = 0
   y_pred_test = 0
+  train_preds = []
   for epoch in range(n_epochs):
     model.train()
     for xb, yb in train_loader:
         optimizer.zero_grad()
         preds = model(xb, None)
+        if epoch == n_epochs - 1:
+          train_preds.append(preds.cpu())
         loss = loss_fn(preds, yb)
         loss.backward()
         optimizer.step()
@@ -91,17 +96,18 @@ def FT_train(model, train_loader, val_loader, test_loader, lr, n_epochs):
           for xb, yb in val_loader:
               preds = model(xb, None)
               val_preds.append(preds.cpu())
-              
+      #test set         
       model.eval()
       test_preds = []
       with torch.no_grad():
           for xb, yb in test_loader:
               preds = model(xb, None)
               test_preds.append(preds.cpu())
+      y_pred_train = torch.cat(train_preds).detach().numpy()        
       y_pred_val = torch.cat(val_preds).numpy()
       y_pred_test = torch.cat(test_preds).numpy()
 
-  return y_pred_val, y_pred_test
+  return y_pred_train, y_pred_val, y_pred_test
 
 class TabNetWrapper(torch.nn.Module):
     __slots__ = ['tabnet_regressor'] #save memory
@@ -114,14 +120,15 @@ class TabNetWrapper(torch.nn.Module):
       
 # Define the wrapper for FT-Transformer
 class FTTransformerWrapper(nn.Module):
-    __slots__ = ['ft_model']
     def __init__(self, ft_model):
-        super(FTTransformerWrapper, self).__init__()
+        super().__init__()
         self.ft_model = ft_model
 
-    def forward(self, x_cont):
-        # Call the original FT-Transformer with x_cont and x_cat=None
-        return self.ft_model(x_cont, x_cat=None)
+    def forward(self, x):
+        out = self.ft_model(x, x_cat=None)
+        if out.dim() == 1:
+            out = out.unsqueeze(-1)  # make shape: (batch_size, 1)
+        return out
 
 def check_heavy_tail(y):
   skewness = skew(y)
@@ -137,20 +144,30 @@ def get_split_type(model_name):
     return "standard"
   else:
     return "quantile"
+  
 
 def shap_plot(model_name, model_parameters, df, name, column_names):
   device = "cuda" if torch.cuda.is_available() else "cpu"
   batch_size_tabnet = 8
-  print(model_name)
  
   model = None
   unsupervised_model = None
   X = df.drop(df.columns[-1], axis=1)
   y = df[df.columns[-1]]
-  log_scale = check_heavy_tail(y)
-  y = np.log(y + 1e-6) if log_scale else scale(y)  # Apply transformation once
-  split_type = get_split_type(model_name)
-  X_train, y_train, X_val, y_val, X_test, y_test = split_data(X, y, type_scale=split_type, rng=42)
+
+  if name != 'freedman':
+    log_scale = check_heavy_tail(y)
+    y = np.log(y + 1e-6) if log_scale else scale(y)  # Apply transformation once
+    split_type = get_split_type(model_name)
+    X_train, y_train, X_val, y_val, X_test, y_test = split_data(X, y, type_scale=split_type, rng=42)
+  
+  else:
+    X_train, X_test, y_train, y_test = train_test_split(X, y, train_size=0.7, random_state=42)
+    X_val, X_test, y_val, y_test = train_test_split(X_test, y_test, train_size=0.3, random_state=42)
+    
+  if name == 'freedman':
+    model_parameters = "No hyperparameters"
+  
   if model_parameters == "No hyperparameters": #check if default hyperparameters
     if model_name == "LassoNet":
       model = LassoNetRegressor(device=device, n_iters=(75, 50))  
@@ -158,7 +175,7 @@ def shap_plot(model_name, model_parameters, df, name, column_names):
     elif model_name == "MLP":
         model = MLPRegressor(early_stopping=True) 
     elif model_name == "XGBoost":
-        model = XGBRegressor(early_stopping_rounds=10) 
+        model = XGBRegressor(early_stopping_rounds=50) 
     elif model_name == "RandomForest":
         model = RandomForestRegressor(n_jobs=-1)
     elif model_name == "RealMLP":
@@ -177,7 +194,7 @@ def shap_plot(model_name, model_parameters, df, name, column_names):
       model = LassoNetRegressor(
           hidden_dims=hidden_dims,
           batch_size=batch_size,
-          n_iters=(75, 50),
+          n_iters=(25, 25),
           M=M,
           device=device,
       )
@@ -198,7 +215,7 @@ def shap_plot(model_name, model_parameters, df, name, column_names):
       alpha = model_parameters["alpha"]
       
       model = XGBRegressor(max_depth=max_depth, min_child_weight=min_child_weight, reg_lambda=lambd, gamma=gamma, 
-                          alpha=alpha, n_estimators=n_estimators, early_stopping_rounds=10)
+                          alpha=alpha, n_estimators=n_estimators)
     elif model_name == "RandomForest":
       max_depth = model_parameters["max_depth"]
       n_estimators = model_parameters["n_estimators"]
@@ -296,14 +313,26 @@ def shap_plot(model_name, model_parameters, df, name, column_names):
     shap_data = pd.DataFrame(X_test[:100], columns=column_names)
   
   elif model_name == "FT-Transformer":
-    X_train = torch.tensor(X_train, dtype=torch.float32)
-    y_train = torch.tensor(y_train, dtype=torch.float32).unsqueeze(1)
+    if freedman:
+      X_train = torch.tensor(X_train.to_numpy(), dtype=torch.float32)
+      y_train = torch.tensor(y_train.to_numpy(), dtype=torch.float32).unsqueeze(1) #FT-Transformer expects 2-dimensional output
 
-    X_val = torch.tensor(X_val, dtype=torch.float32)
-    y_val = torch.tensor(y_val, dtype=torch.float32).unsqueeze(1)
+      X_val = torch.tensor(X_val.to_numpy(), dtype=torch.float32)
+      y_val = torch.tensor(y_val.to_numpy(), dtype=torch.float32).unsqueeze(1)
 
-    X_test = torch.tensor(X_test, dtype=torch.float32)
-    y_test = torch.tensor(y_test, dtype=torch.float32).unsqueeze(1)
+      X_test = torch.tensor(X_test.to_numpy(), dtype=torch.float32)
+      y_test = torch.tensor(y_test.to_numpy(), dtype=torch.float32).unsqueeze(1)
+    else:
+      X_train = torch.tensor(X_train, dtype=torch.float32)
+      y_train = torch.tensor(y_train, dtype=torch.float32).unsqueeze(1) #FT-Transformer expects 2-dimensional output
+
+      X_val = torch.tensor(X_val, dtype=torch.float32)
+      y_val = torch.tensor(y_val, dtype=torch.float32).unsqueeze(1)
+
+      X_test = torch.tensor(X_test, dtype=torch.float32)
+      y_test = torch.tensor(y_test, dtype=torch.float32).unsqueeze(1)
+    
+    X_train, X_val, X_test, y_train, y_val, y_test = X_train.to(device), X_val.to(device), X_test.to(device), y_train.to(device), y_val.to(device), y_test.to(device)
 
     # Create TensorDatasets
     train_ds = TensorDataset(X_train, y_train)
@@ -312,7 +341,7 @@ def shap_plot(model_name, model_parameters, df, name, column_names):
 
     n_cont_features = X_train.shape[1]
     
-    if not model_parameters:
+    if model_parameters == "No hyperparameters":
       batch_size_ft = 8 #random batch_size for default model=
       lr = 0.001  #default learning rate
       model = FTTransformer(
@@ -346,15 +375,32 @@ def shap_plot(model_name, model_parameters, df, name, column_names):
           linformer_kv_compression_ratio=0.2,           # values taken from https://github.com/yandex-research/rtdl-revisiting-models/blob/main/package/README.md
           linformer_kv_compression_sharing='headwise',  # <---
       )
+    model = model.to(device)
     train_loader = DataLoader(train_ds, batch_size=batch_size_ft, shuffle=True)
     val_loader = DataLoader(val_ds, batch_size=batch_size_ft)
     test_loader = DataLoader(test_ds, batch_size=batch_size_ft)
-    _, _ = FT_train(model, train_loader, val_loader, test_loader, lr, 50)
-    wrapped_ft_model = FTTransformerWrapper(model)
-    explainer = GradientExplainer(wrapped_ft_model, X_train[:100])
-    shap_values = explainer.shap_values(X_test[:100])
-    shap_data = pd.DataFrame(X_test[:100], columns=column_names)
+    y_pred_train, _, _ = FT_train(model, train_loader, val_loader, test_loader, lr, 50)
+    wrapped_ft_model = FTTransformerWrapper(model).to(device)
+    wrapped_ft_model.eval() #has to be used for SHAP
+    X_train_tensor = X_train[:100].clone().detach().requires_grad_(True).to(device)
+    X_test_tensor = X_test[:100].clone().detach().to(device)
+    explainer = shap.GradientExplainer(wrapped_ft_model, X_train_tensor)
+    shap_values = explainer.shap_values(X_test_tensor)
+    X_test_np = X_test_tensor.detach().cpu().numpy()
+    shap_data = pd.DataFrame(X_test_np, columns=column_names)
   
+  elif model_name == "RealMLP":
+    X_train_df = pd.DataFrame(X_train, columns=column_names)  
+    X_test_df = pd.DataFrame(X_test, columns=column_names)
+    model.fit(X_train_df, y_train)
+    def predict_with_dataframe(X):
+      if isinstance(X, np.ndarray):
+          X = pd.DataFrame(X, columns=column_names) #to fix the column names problem with RealMLP features in fit not the same as feature in model.predict
+      return model.predict(X)
+    
+    explainer = shap.KernelExplainer(predict_with_dataframe, X_train_df.iloc[:100])
+    shap_values = explainer.shap_values(X_test_df.iloc[:100], nsamples=100)
+    shap_data = X_test_df.iloc[:100].copy()
   else:
     model.fit(X_train, y_train)
     if model_name == "RandomForest":
@@ -366,59 +412,78 @@ def shap_plot(model_name, model_parameters, df, name, column_names):
       shap_values = explainer.shap_values(X_test[:100], nsamples=100)
       shap_data = pd.DataFrame(X_test[:100], columns=column_names)
     
-  if model_name != "LassoNet":
-    shap.summary_plot(shap_values, shap_data, max_display=10,show=False)
-    plt.savefig(f'{name}shap_summary_{model_name}.pdf',dpi=700) 
-    plt.close()
-    if isinstance(explainer.expected_value, (int, float)):
-        base_values_array = np.array([explainer.expected_value])
+  if model_name == "FT-Transformer" or model_name == "TabNet":
+    shap_values = shap_values[:, :, 0] #since shape of shap_values in this case is (100, 100, 1)
+    if model_name == "FT-Transformer":
+      base_pred = float(np.mean(y_pred_train))
     else:
-        base_values_array = np.array(explainer.expected_value) # In case it's already an array-like but not strictly np.array
+      base_pred = float(np.mean(model.predict(X_train[:100])))
+    base_value_scalar = base_pred
+  elif model_name != "LassoNet":
+    base_value_scalar = float(np.mean(explainer.expected_value))
+    
+  base_values_array = np.array([base_value_scalar], dtype=np.float32)
+  explanation = shap.Explanation(
+      values=shap_values,
+      base_values=base_values_array,
+      data=shap_data,
+      feature_names=column_names
+  )
+  
+  shap.summary_plot(shap_values, shap_data, max_display=10,show=False, rng=42)
+  plt.savefig(f'shap_plots/{name}shap_summary_{model_name}100.pdf',dpi=700) 
+  plt.close()
+  shap.plots.bar(explanation, show=False)
+  plt.savefig(f'shap_plots/{name}shap_barplot_{model_name}100.pdf',dpi=700) 
+  plt.close()
 
-    explanation_for_bar_plot = shap.Explanation(
-        values=shap_values,
-        base_values=base_values_array,  # Use the converted base_values
-        data=shap_data.values,  # data should be a numpy array
-        feature_names=shap_data.columns.tolist()
-    )
-    shap.plots.bar(explanation_for_bar_plot, show=False)
-    plt.savefig(f'{name}shap_barplot_{model_name}.pdf',dpi=700) 
-    plt.close()
   
 if __name__ == '__main__':
-  dataset_ids = {
-    "houses": 44138,
-  } 
+  freedman = True
+  if not freedman:
+    dataset_ids = {
+      "Brazilian_houses": 44141,
+      "house_16H": 44139,
+      "nyc-taxi-green-dec-2016": 44143,
+    }
+    
+    datasets = {}
+    for name, dataset_id in dataset_ids.items():
+      dataset = openml.datasets.get_dataset(dataset_id)
+      X, y, _, attributes = dataset.get_data(target=dataset.default_target_attribute)  # Load dataset features and target
+      df = pd.DataFrame(X, columns=attributes)
+      df[dataset.default_target_attribute] = y
+      datasets[name] = df
+      print(f"Downloaded dataset '{name}' with {X.shape[0]} samples and {X.shape[1]} features.")
+        
+    random_state = 42    
+    preprocessed_datasets = {name: full_preprocessing(df) for name, df in datasets.items()}
 
-
-  datasets = {}
-  feature_names = {}
-  for name, dataset_id in dataset_ids.items():
-    dataset = openml.datasets.get_dataset(dataset_id)
-    X, y, _, attributes = dataset.get_data(target=dataset.default_target_attribute)  # Load dataset features and target
-    df = pd.DataFrame(X, columns=attributes)
-    df[dataset.default_target_attribute] = y
-    feature_names[name] = list(df.columns[:-1])
-    datasets[name] = df
-    print(f"Downloaded dataset '{name}' with {X.shape[0]} samples and {X.shape[1]} features.")
-      
-  random_state = 42    
-  preprocessed_datasets = {name: full_preprocessing(df) for name, df in datasets.items()}
-
-  results_df = pd.read_pickle("results_50iter_RealMLP.pkl")
+  df_ft = pd.read_pickle("Pickle_datasets/results_50iter_FT-Transformer.pkl")
+  df_mlp = pd.read_pickle("Pickle_datasets/results_50iter_MLP.pkl")
+  df_xgb = pd.read_pickle("Pickle_datasets/results_50iter_XGBoost.pkl")
+  df_rmlp = pd.read_pickle("Pickle_datasets/results_50iter_RealMLP.pkl")
+  results_df = pd.concat([df_rmlp])
   model_names = results_df['model_name'].unique()
-  print(model_names)
   model_dict = {name:idx for idx, name in enumerate(model_names)}
   number_of_models = len(model_names)
-  
-  
+  feature_names = {}
   for model_name in model_names:
+    print(model_name)
     subset_df = results_df.loc[results_df['model_name'] == model_name]
     best_param = subset_df.loc[subset_df['r2_val'].idxmax()]
     hyperparameters = best_param['hyperparameters']
-    for name, _ in datasets.items():
-      print(name)
-      df = preprocessed_datasets[name]
-      column_names = feature_names[name]
-      shap_plot(model_name, hyperparameters, df, name, column_names)
-      
+    if not freedman:
+      for name, _ in datasets.items():
+        print(name)
+        df = preprocessed_datasets[name]
+        feature_names[name] = list(df.columns[:-1])
+        column_names = feature_names[name]
+        shap_plot(model_name, hyperparameters, df, name, column_names)
+    else:
+      X, y = make_friedman1(n_samples=1000, random_state=42, n_features=100)
+      df = pd.DataFrame(X, columns=[f'feature_{i+1}' for i in range(X.shape[1])])
+      df['target'] = y
+      column_names = list(df.columns[:-1])
+      nname = 'freedman'
+      shap_plot(model_name, hyperparameters, df, nname, column_names)

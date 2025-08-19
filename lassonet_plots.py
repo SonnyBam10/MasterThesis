@@ -7,6 +7,7 @@ from sklearn.preprocessing import QuantileTransformer, StandardScaler, scale
 from sklearn.model_selection import train_test_split
 from scipy.stats import kurtosis, skew
 import matplotlib.pyplot as plt
+from sklearn.metrics import r2_score
 
 def split_data(X, y, type_scale="standard", rng=None):
   if type_scale == "standard":
@@ -39,72 +40,105 @@ def check_heavy_tail(y):
     )  
   return heavy_tailed
 
-def lasso_test(df, lambda_index):
+def lasso_test(df, lambda_index=100, M=10):
   X = df.drop(df.columns[-1], axis=1)
   y = df[df.columns[-1]]
   log_scale = check_heavy_tail(y)
   y = np.log(y + 1e-6) if log_scale else scale(y) 
-  X_train, y_train, X_val, _, _, _ = split_data(X, y, type_scale="quantile", rng=42)
+  X_train, y_train, X_val, y_val, X_test, y_test = split_data(X, y, type_scale="quantile", rng=42)
   model = LassoNetRegressor(
           batch_size=32,
           n_iters=(75, 50),
-          M=10,
+          M=M,
           device=device,
         )
   model.optim_path = lambda params: torch.optim.Adam(params, lr=1e-3)
   path = model.path(X_train, y_train, return_state_dicts=True)  
-  while lambda_index >= len(path):
-    lambda_index -= len(path)
-
+  lambda_index = lambda_index % len(path)
   selected = path[lambda_index].selected
   model.fit(X_train[:, selected], y_train, dense_only=True)
 
   y_pred_val = model.predict(X_val[:, selected])
+  y_pred_train = model.predict(X_train[:, selected])
+  y_pred_test = model.predict(X_test[:, selected])
+  
+  r2_val = r2_score(y_val, y_pred_val)
+  r2_train = r2_score(y_train, y_pred_train)
+  r2_test = r2_score(y_test, y_pred_test)
  
-  return model, path, y_pred_val
+  return model, path, r2_val, r2_train, r2_test
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
-lambda_indexes = np.arange(5, 400, 5)
-dataset_ids = {
-    "cpu_act": 44132,
-  }
+if __name__ == '__main__':
+  device = "cuda" if torch.cuda.is_available() else "cpu"
+  lambda_indexes = np.arange(5, 600, 100)
+  dataset_ids = {
+      "cpu_act": 44132,
+    }
+  datasets = {}
+  for name, dataset_id in dataset_ids.items():
+    dataset = openml.datasets.get_dataset(dataset_id)
+    X, y, _, attributes = dataset.get_data(target=dataset.default_target_attribute)  # Load dataset features and target
+    df = pd.DataFrame(X, columns=attributes)
+    df[dataset.default_target_attribute] = y
+    datasets[name] = df
+    print(f"Downloaded dataset '{name}' with {X.shape[0]} samples and {X.shape[1]} features.")
 
-
-datasets = {}
-for name, dataset_id in dataset_ids.items():
-  dataset = openml.datasets.get_dataset(dataset_id)
-  X, y, _, attributes = dataset.get_data(target=dataset.default_target_attribute)  # Load dataset features and target
-  df = pd.DataFrame(X, columns=attributes)
-  df[dataset.default_target_attribute] = y
-  datasets[name] = df
-  print(f"Downloaded dataset '{name}' with {X.shape[0]} samples and {X.shape[1]} features.")
-  
-
-for name, _ in dataset_ids.items():
-  val_r2_values = []
-  best_score = -np.inf
-  model_params = []
-  best_id = 0
-  for lambda_index in lambda_indexes:
-    df = datasets[name]
-    model, path, val_score = lasso_test(df, lambda_index) 
-    val_r2_values.append(val_score)  
-    if val_score > best_score:
-      best_score = val_score
-      model_params = [model, path]
-      best_id = lambda_index
-  
-  model, path = model_params
-  plt.bar(range(len(model.feature_importances_)), model.feature_importances_)
-  plt.xlabel("Feature Index")
-  plt.ylabel("Lambda at Removal (Feature Importance)")
-  plt.title("Feature Importances for best_id Model")
-  plt.savefig(f'FeatureImportancesfordataset{name}.pdf')
-  plt.clf()
+  for name, _ in dataset_ids.items():
+    val_r2_values = []
+    train_r2_values = []
+    test_r2_values = []
+    best_score = -np.inf
+    model_params = []
+    best_id = 0
+    for lambda_index in lambda_indexes:
+      df = datasets[name]
+      model, path, val_score, train_score, test_score = lasso_test(df, lambda_index) 
+      val_r2_values.append(val_score)  
+      train_r2_values.append(val_score)  
+      test_r2_values.append(val_score)  
+      if val_score > best_score:
+        best_score = val_score
+        model_params = [model, path]
+        best_id = lambda_index
     
-  plt.plot(lambda_index, val_r2_values, label='validation')
-  plt.xlabel('Lambda (log scale)')
-  plt.ylabel('R2-score')
-  plt.legend()
-  plt.savefig(f'LambdaR2scoredataset{name}.pdf')
-  
+    model, path = model_params
+    plt.bar(range(len(model.feature_importances_)), model.feature_importances_)
+    plt.xlabel("Feature Index")
+    plt.ylabel("Lambda at Removal (Feature Importance)")
+    plt.title("Feature Importances for best_id Model")
+    plt.savefig(f'feature_importances_bar_graph{name}.pdf')
+    plt.clf()
+      
+    plt.plot(lambda_index, val_r2_values, label='validation')
+    plt.plot(lambda_index, train_r2_values, label='validation')
+    plt.plot(lambda_index, test_r2_values, label='validation')
+    plt.xlabel('Lambda (log scale)')
+    plt.set_xscale('log')
+    plt.ylabel('R2-score')
+    plt.legend()
+    plt.savefig(f'lambda_vs_r2score{name}.pdf')
+    plt.clf()
+    
+    M_list = [5, 10, 20, 50, 100, 500]
+    for name, _ in dataset_ids.items():
+      val_r2_values = []
+      train_r2_values = []
+      test_r2_values = []
+      best_score = -np.inf
+      model_params = []
+      best_id = 0
+      for M_value in M_list:
+        df = datasets[name]
+        model, path, val_score, train_score, test_score = lasso_test(df, M=M_value) 
+        val_r2_values.append(val_score)  
+        train_r2_values.append(val_score)  
+        test_r2_values.append(val_score)  
+        
+    plt.plot(M_list, val_r2_values, label='validation')
+    plt.plot(M_list, train_r2_values, label='validation')
+    plt.plot(M_list, test_r2_values, label='validation')
+    plt.xlabel('Hierarchy coefficient (M)')
+    plt.ylabel('R2-score')
+    plt.legend()
+    plt.savefig(f'M_vs_r2score{name}.pdf')
+    plt.clf()
