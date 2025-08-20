@@ -357,7 +357,7 @@ def shap_plot(model_name, model_parameters, df, name, column_names):
           ffn_dropout=0.1,
           residual_dropout=0.0,
           linformer_kv_compression_ratio=0.2,           # values taken from https://github.com/yandex-research/rtdl-revisiting-models/blob/main/package/README.md
-          linformer_kv_compression_sharing='headwise',  # <---
+          linformer_kv_compression_sharing='headwise',  
       )
     else:
       model = FTTransformer(
@@ -373,7 +373,7 @@ def shap_plot(model_name, model_parameters, df, name, column_names):
           ffn_dropout=0.1,
           residual_dropout=res_dropout,
           linformer_kv_compression_ratio=0.2,           # values taken from https://github.com/yandex-research/rtdl-revisiting-models/blob/main/package/README.md
-          linformer_kv_compression_sharing='headwise',  # <---
+          linformer_kv_compression_sharing='headwise', 
       )
     model = model.to(device)
     train_loader = DataLoader(train_ds, batch_size=batch_size_ft, shuffle=True)
@@ -434,6 +434,7 @@ def shap_plot(model_name, model_parameters, df, name, column_names):
   plt.savefig(f'shap_plots/{name}shap_summary_{model_name}100.pdf',dpi=700) 
   plt.close()
   shap.plots.bar(explanation, show=False)
+  plt.tight_layout()
   plt.savefig(f'shap_plots/{name}shap_barplot_{model_name}100.pdf',dpi=700) 
   plt.close()
 
@@ -460,10 +461,9 @@ if __name__ == '__main__':
     preprocessed_datasets = {name: full_preprocessing(df) for name, df in datasets.items()}
 
   df_ft = pd.read_pickle("Pickle_datasets/results_50iter_FT-Transformer.pkl")
-  df_mlp = pd.read_pickle("Pickle_datasets/results_50iter_MLP.pkl")
-  df_xgb = pd.read_pickle("Pickle_datasets/results_50iter_XGBoost.pkl")
-  df_rmlp = pd.read_pickle("Pickle_datasets/results_50iter_RealMLP.pkl")
-  results_df = pd.concat([df_rmlp])
+  #df_xgb = pd.read_pickle("Pickle_datasets/results_50iter_XGBoost.pkl")
+  #df_rmlp = pd.read_pickle("Pickle_datasets/results_50iter_RealMLP.pkl")
+  results_df = pd.concat([df_ft])
   model_names = results_df['model_name'].unique()
   model_dict = {name:idx for idx, name in enumerate(model_names)}
   number_of_models = len(model_names)

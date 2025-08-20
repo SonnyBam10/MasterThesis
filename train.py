@@ -97,7 +97,7 @@ def generate_hyperparameters_space(model_name):
   parameters = None
   if model_name == "LassoNet":
     parameters = {
-      "lambda_indexes" : np.arange(5, 400, 10),
+      "lambda_indexes" : np.arange(10 , 610, 10),
       "num_layers" : range(1, 9),
       "layer_sizes" : range(16, 1025),
       "batch_sizes" : [256, 512, 1024],
@@ -135,7 +135,7 @@ def generate_hyperparameters_space(model_name):
   
   elif model_name == "TabNet":
     parameters = {
-      "num_steps" : range(3, 6),
+      "num_steps" : range(3, 8),
       "n_ds" : [8, 16, 24],
       "n_as" : [8, 16, 24],
       "gammas" : [1.0, 1.2, 1.5, 2.0],
@@ -228,7 +228,7 @@ def generate_config(model_name, n_iterations, n_shuffles):
     
     elif model_name == "XGBoost":
       max_depth = random.choice(parameters["max_depths"])
-      n_estimators = log_uniform_distribution(100, 2000, isint=True)
+      n_estimators = random.choice(parameters["num_estimators"])
       min_child_weight = log_uniform_distribution(1, 1e2, isint=True)
       lr = log_uniform_distribution(1e-5, 0.7)
       gamma = log_uniform_distribution(1e-8, 7)
@@ -673,7 +673,7 @@ if __name__ == '__main__':
     quantile_splits = [split_data(X, y, type_scale="quantile", rng=random_state+i) for i in range(n_iter)]
     quantile_precomputed_splits[name] = quantile_splits
 
-  n_iterations = 25
+  n_iterations = 50
 
   model_names = ["LassoNet"]
   
