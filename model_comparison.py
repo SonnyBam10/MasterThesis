@@ -350,16 +350,15 @@ dataset_names_sorted = np.array(dataset_names)[sorted_indices]
 mean_r2_sorted = np.array(mean_r2_test_values)[sorted_indices]
 fig, ax = plt.subplots()
 colors = plt.cm.viridis(np.linspace(0, 1, len(mean_r2_sorted)))
-ax.bar(dataset_names_sorted, mean_r2_sorted, color=colors, width=0.5)
+ax.bar(dataset_names_sorted, mean_r2_sorted, color=colors, width=0.8) #wider bars
 plt.xticks(rotation=45, ha='right')
-ax.set_ylabel('Mean R-squared test score')
-ax.set_title('Mean R-squared test score by dataset')
-plt.ylim(-0.1, 1.05) 
+ax.set_ylabel('Mean R² test score')
+ax.set_title('Mean R² test score by dataset')
 plt.tight_layout()
 plt.savefig("bar_plt_dataset_colored.pdf")
 plt.clf()
 
-total_rank = 0
+"""total_rank = 0
 average_ranks = []
 for model_name in model_names:
   print(model_name)
@@ -385,7 +384,7 @@ graph_ranks(
     filename="cd_diagram.pdf",
     dpi=300
 )
-
+"""
 
 
 
