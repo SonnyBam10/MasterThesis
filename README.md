@@ -1,3 +1,2 @@
-The Pickle_datasets folder contains all datasets resulting from the train.py code in the pickle format. <br/>
-The shap_plots folder contains all shap_plots generated in the context of this Master's thesis. <br/>
-The Sbatches folder contains the batch files that were used to run code on the Alan cluster.
+This thesis, carried out as part of my Master’s thesis in Engineering Data Science at the University of Liège, <br/>
+focuses on benchmarking different Deep Learning architectures for tabular data prediction tasks.
